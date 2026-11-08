@@ -1,0 +1,89 @@
+name: PR 19 Apple package validation
+
+on:
+  push:
+    branches: [bvolpato/pr19-apple-validation-20261108]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr19-apple-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apple-packages:
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      EXPECTED_SOURCE: 5dd8ea2bcf592d53ffdcf4af42d46c31901a21b2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Verify the proposed source and Apple toolchain
+        run: |
+          git diff --exit-code "$EXPECTED_SOURCE" HEAD -- . ':!.github/workflows/pr19-apple-validation.yml'
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk appletvos --show-sdk-version
+          swift --version
+
+      - name: Install packaging tools
+        run: brew install ldid dpkg
+
+      - name: Build and sign the iOS and tvOS CLI
+        run: |
+          make all CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=
+          make tvos CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=
+
+      - name: Run native package regressions
+        run: |
+          ./scripts/test-archive-locale.sh
+          ./scripts/test-launchd-plist-paths.sh
+          ./scripts/test-passcode-ledger.sh
+          ./scripts/test-foreground-uid.sh
+          ./scripts/test-interface-geometry.sh
+          ./scripts/test-roothide-root.sh
+          ./scripts/test-syslog.sh
+          ./scripts/test-probe.sh
+          ./scripts/test-sha512-crypt.sh
+
+      - name: Build and verify iOS and tvOS packages
+        run: ./scripts/check-packages.sh
+
+      - name: Compile the public geometry API in versioned package consumers
+        run: |
+          cat >> Tests/PackageConsumer/Sources/IcliPackageConsumer/main.swift <<'SWIFT'
+
+          let activeGeometry = try InterfaceGeometry(
+              width: 951, height: 669, referenceWidth: 669, referenceHeight: 951,
+              scale: 3, orientation: 90
+          )
+          let activeMetrics = withInterfaceGeometry(activeGeometry) { screenInfo() }
+          precondition(activeMetrics["width"] as? Double == 951)
+          precondition(activeMetrics["height"] as? Double == 669)
+          precondition(activeMetrics["scale"] as? Double == 3)
+          SWIFT
+          python3 scripts/check-package-consumer.py
+
+      - name: Upload validation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr19-apple-packages
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            .build/icli
+            .build/icli-tvos
+            .build/package-verification.json
+            .build/package-consumer-verification.json
+            .build/package-consumer/IcliPackageConsumer
+            .build/package-consumer/IcliSystemConsumer
+            .build/package-consumer/IcliLaunchConsumer
+            .build/package-consumer/tvos/IcliPackageConsumer
+            .build/package-consumer/tvos/IcliSystemConsumer
+            .build/package-consumer/tvos/IcliLaunchConsumer
